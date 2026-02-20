@@ -3,23 +3,22 @@ import argparse
 import os
 import sys
 import glob
-from scrapy.crawler import CrawlerProcess
-from scrapy.utils.project import get_project_settings
+import csv
+import subprocess
+from datetime import datetime
 
 
-def run_scrapers():
-    print("\n" + "="*60)
-    print("FASE 1: EXTRACCION DE DATOS (Web Scraping)")
-    print("="*60)
+def run_single_spider(spider_name):
+    from scrapy.crawler import CrawlerProcess
     
-    os.environ['SCRAPY_SETTINGS_MODULE'] = 'scraper.settings'
+    os.makedirs('data/raw', exist_ok=True)
     
-    process = CrawlerProcess(settings={
+    settings = {
         'BOT_NAME': 'ecommerce_scraper',
         'SPIDER_MODULES': ['scraper.spiders'],
         'NEWSPIDER_MODULE': 'scraper.spiders',
         'ROBOTSTXT_OBEY': True,
-        'DOWNLOAD_DELAY': 2,
+        'DOWNLOAD_DELAY': 3,
         'RANDOMIZE_DOWNLOAD_DELAY': True,
         'CONCURRENT_REQUESTS': 1,
         'CONCURRENT_REQUESTS_PER_DOMAIN': 1,
@@ -37,27 +36,57 @@ def run_scrapers():
             'scraper.middlewares.RandomUserAgentMiddleware': 400,
         },
         'LOG_LEVEL': 'INFO',
-        'FEED_FORMAT': 'csv',
-        'FEED_EXPORT_ENCODING': 'utf-8',
-    })
+        'FEEDS': {
+            f'data/raw/{spider_name}.csv': {
+                'format': 'csv',
+                'encoding': 'utf-8',
+                'fields': ['nombre', 'precio_actual', 'precio_anterior', 'descuento_porcentaje', 
+                           'ubicacion_vendedor', 'cuotas', 'envio_gratis', 'enlace', 'categoria', 'fecha_extraccion'],
+                'overwrite': True,
+            }
+        }
+    }
     
-    from scraper.spiders.laptops_spider import LaptopsSpider
-    from scraper.spiders.celulares_spider import CelularesSpider
-    from scraper.spiders.televisores_spider import TelevisoresSpider
+    spider_classes = {
+        'laptops': 'scraper.spiders.laptops_spider.LaptopsSpider',
+        'celulares': 'scraper.spiders.celulares_spider.CelularesSpider',
+        'televisores': 'scraper.spiders.televisores_spider.TelevisoresSpider',
+    }
     
-    spiders = [
-        ('laptops', LaptopsSpider, 'data/raw/laptops.csv'),
-        ('celulares', CelularesSpider, 'data/raw/celulares.csv'),
-        ('televisores', TelevisoresSpider, 'data/raw/televisores.csv'),
-    ]
+    import importlib
+    module_path, class_name = spider_classes[spider_name].rsplit('.', 1)
+    module = importlib.import_module(module_path)
+    spider_class = getattr(module, class_name)
+    
+    process = CrawlerProcess(settings=settings)
+    process.crawl(spider_class)
+    process.start()
+
+
+def run_scrapers():
+    print("\n" + "="*60)
+    print("FASE 1: EXTRACCION DE DATOS (Web Scraping)")
+    print("="*60)
     
     os.makedirs('data/raw', exist_ok=True)
     
-    for name, spider_class, output_path in spiders:
-        print(f"\n--- Ejecutando spider: {name} ---")
-        process.crawl(spider_class)
+    spiders = ['laptops', 'celulares', 'televisores']
     
-    process.start()
+    for spider_name in spiders:
+        print(f"\n--- Ejecutando spider: {spider_name} ---")
+        
+        result = subprocess.run(
+            [sys.executable, __file__, '--spider', spider_name],
+            capture_output=False,
+            text=True
+        )
+        
+        csv_path = f'data/raw/{spider_name}.csv'
+        if os.path.exists(csv_path):
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                count = sum(1 for _ in csv.DictReader(f))
+            print(f"Guardados {count} productos en {csv_path}")
+    
     print("\nScraping completado!")
 
 
@@ -74,7 +103,7 @@ def load_to_database():
         db.create_table()
         print("Tabla 'productos' creada correctamente")
         
-        csv_files = glob.glob('data/raw/*.csv')
+        csv_files = sorted(glob.glob('data/raw/*.csv'))
         total_loaded = 0
         
         for csv_file in csv_files:
@@ -83,7 +112,11 @@ def load_to_database():
                 print(f"Cargados {count} productos desde {csv_file}")
                 total_loaded += count
         
-        print(f"\nTotal de productos en la base de datos: {db.get_total_products()}")
+        total = db.get_total_products()
+        print(f"\nTotal de productos en la base de datos: {total}")
+        
+        if total == 0:
+            print("ADVERTENCIA: No se cargaron productos. Verifica los archivos CSV.")
 
 
 def run_analysis():
@@ -114,10 +147,17 @@ Ejemplos de uso:
         choices=['scrape', 'load', 'analyze'],
         help='Ejecutar solo una fase especifica'
     )
+    parser.add_argument(
+        '--spider',
+        choices=['laptops', 'celulares', 'televisores'],
+        help='Ejecutar un spider especifico (uso interno)'
+    )
     
     args = parser.parse_args()
     
-    if args.phase == 'scrape':
+    if args.spider:
+        run_single_spider(args.spider)
+    elif args.phase == 'scrape':
         run_scrapers()
     elif args.phase == 'load':
         load_to_database()
